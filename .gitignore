@@ -1,0 +1,6 @@
+*
+!.gitignore
+!Makefile
+!ng_vnet.h
+!ng_vnet.c
+!util.h
