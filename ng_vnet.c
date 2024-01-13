@@ -98,6 +98,7 @@ static struct prison *
 vnet_to_prison(struct vnet *vnet)
 {
 	// TODO: Find a better way to do this
+	if(vnet == vnet0) return &prison0;
 	struct prison *result;
 	int            descend;
 	FOREACH_PRISON_DESCENDANT(&prison0, result, descend)
