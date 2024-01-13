@@ -26,17 +26,17 @@
  * SUCH DAMAGE.
  */
 
-#ifndef _NETGRAPH_NG_VNET_H_
-#define _NETGRAPH_NG_VNET_H_
+#ifndef _NETGRAPH_NG_VNET_HUB_H_
+#define _NETGRAPH_NG_VNET_HUB_H_
 
 /* Node type name and magic cookie. */
-#define NG_VNET_NODE_TYPE "vnet"
-#define NGM_VNET_COOKIE   3548444763
+#define NG_VNET_HUB_NODE_TYPE "vnet_hub"
+#define NGM_VNET_HUB_COOKIE   3548444763
 
 /* Netgraph control messages */
 enum
 {
-	NGM_VNET_CONNECT = 1,
+	NGM_VNET_HUB_CONNECT = 1,
 };
 
-#endif /* _NETGRAPH_NG_VNET_H_ */
+#endif /* _NETGRAPH_NG_VNET_HUB_H_ */

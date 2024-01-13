@@ -36,12 +36,14 @@
 #include <netgraph/ng_message.h>
 #include <netgraph/ng_parse.h>
 #include <net/vnet.h>
-#include "ng_vnet.h"
+#include "ng_vnet_hub.h"
 #include "util.h"
 #include <netgraph/netgraph.h>
 
 #ifdef NG_SEPARATE_MALLOC
-static MALLOC_DEFINE(M_NETGRAPH_VNET, "netgraph_vnet", "netgraph vnet node");
+static MALLOC_DEFINE(M_NETGRAPH_VNET_HUB,
+                     "netgraph_vnet_hub",
+                     "netgraph vnet hub node");
 #else
 #	define M_NETGRAPH_VNET M_NETGRAPH
 #endif
@@ -52,42 +54,42 @@ static MALLOC_DEFINE(M_NETGRAPH_VNET, "netgraph_vnet", "netgraph vnet node");
 		goto done;   \
 	}
 
-struct ng_vnet_private
+struct private
 {
 	struct dlist list;
 	node_p       node;
 };
-typedef struct ng_vnet_private *priv_p;
+typedef struct private *priv_p;
 
-static ng_constructor_t ng_vnet_constructor;
-static ng_rcvmsg_t      ng_vnet_rcvmsg;
-static ng_shutdown_t    ng_vnet_shutdown;
-static ng_rcvdata_t     ng_vnet_rcvdata;
+static ng_constructor_t constructor;
+static ng_rcvmsg_t      rcvmsg;
+static ng_shutdown_t    shutdown;
+static ng_rcvdata_t     rcvdata;
 
 /* List of commands and how to convert arguments to/from ASCII */
-static const struct ng_cmdlist ng_vnet_cmdlist[] = {
-	{ NGM_VNET_COOKIE,
-     NGM_VNET_CONNECT, "connect",
+static const struct ng_cmdlist cmdlist[] = {
+	{ NGM_VNET_HUB_COOKIE,
+     NGM_VNET_HUB_CONNECT, "connect",
      &ng_parse_int32_type,
      NULL },
 	{ 0 }
 };
 
-static struct ng_type ng_vnet_typestruct = {
+static struct ng_type typestruct = {
 	.version     = NG_ABI_VERSION,
-	.name        = NG_VNET_NODE_TYPE,
-	.constructor = ng_vnet_constructor,
-	.rcvmsg      = ng_vnet_rcvmsg,
-	.shutdown    = ng_vnet_shutdown,
-	.rcvdata     = ng_vnet_rcvdata,
-	.cmdlist     = ng_vnet_cmdlist,
+	.name        = NG_VNET_HUB_NODE_TYPE,
+	.constructor = constructor,
+	.rcvmsg      = rcvmsg,
+	.shutdown    = shutdown,
+	.rcvdata     = rcvdata,
+	.cmdlist     = cmdlist,
 };
-NETGRAPH_INIT(vnet, &ng_vnet_typestruct);
+NETGRAPH_INIT(vnet, &typestruct);
 
 static int
-ng_vnet_constructor(node_p node)
+constructor(node_p node)
 {
-	priv_p priv = malloc(sizeof(*priv), M_NETGRAPH_VNET, M_WAITOK);
+	priv_p priv = malloc(sizeof(*priv), M_NETGRAPH_VNET_HUB, M_WAITOK);
 	NG_NODE_SET_PRIVATE(node, priv);
 	dlist_init(&priv->list);
 	priv->node = node;
@@ -109,7 +111,7 @@ vnet_to_prison(struct vnet *vnet)
 }
 
 static int
-ng_vnet_rcvmsg(node_p node, item_p item, hook_p lasthook)
+rcvmsg(node_p node, item_p item, hook_p lasthook)
 {
 	const priv_p    priv  = NG_NODE_PRIVATE(node);
 	int             error = 0;
@@ -118,10 +120,10 @@ ng_vnet_rcvmsg(node_p node, item_p item, hook_p lasthook)
 	NGI_GET_MSG(item, msg);
 	switch(msg->header.typecookie)
 	{
-		case NGM_VNET_COOKIE:
+		case NGM_VNET_HUB_COOKIE:
 			switch(msg->header.cmd)
 			{
-				case NGM_VNET_CONNECT:
+				case NGM_VNET_HUB_CONNECT:
 				{
 					if(msg->header.arglen != sizeof(uint32_t)) ERROUT(EINVAL);
 					// find child jail
@@ -133,14 +135,13 @@ ng_vnet_rcvmsg(node_p node, item_p item, hook_p lasthook)
 					CURVNET_SET(child_jail->pr_vnet);
 					// create ng_vnet node inside
 					node_p child_node;
-					error =
-					  ng_make_node_common(&ng_vnet_typestruct, &child_node);
+					error = ng_make_node_common(&typestruct, &child_node);
 					if(error != 0)
 					{
 						CURVNET_RESTORE();
 						ERROUT(error);
 					}
-					error = ng_vnet_constructor(child_node);
+					error = constructor(child_node);
 					if(error != 0)
 					{
 						NG_NODE_UNREF(child_node);
@@ -164,7 +165,7 @@ done:
 }
 
 static int
-ng_vnet_rcvdata(hook_p hook, item_p item)
+rcvdata(hook_p hook, item_p item)
 {
 	const node_p       node = NG_HOOK_NODE(hook);
 	node_p             node2;
@@ -177,9 +178,8 @@ ng_vnet_rcvdata(hook_p hook, item_p item)
 	/* send to other vnet nodes' hooks */
 	for(struct dlist *i = priv->list.next; i != &priv->list; i = i->next)
 	{
-		struct ng_vnet_private *I =
-		  containerof(i, struct ng_vnet_private, list);
-		node2 = I->node;
+		struct private *I = containerof(i, struct private, list);
+		node2             = I->node;
 		LIST_FOREACH(hook2, &node2->nd_hooks, hk_hooks)
 		{
 			if((m2 = m_dup(m, M_NOWAIT)) == NULL)
@@ -218,11 +218,11 @@ ng_vnet_rcvdata(hook_p hook, item_p item)
 }
 
 static int
-ng_vnet_shutdown(node_p node)
+shutdown(node_p node)
 {
 	const priv_p priv = NG_NODE_PRIVATE(node);
 	dlist_remove(&priv->list);
-	free(priv, M_NETGRAPH_VNET);
+	free(priv, M_NETGRAPH_VNET_HUB);
 	NG_NODE_SET_PRIVATE(node, NULL);
 	NG_NODE_UNREF(node);
 	return 0;
