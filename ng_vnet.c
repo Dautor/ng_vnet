@@ -31,8 +31,11 @@
 #include <sys/kernel.h>
 #include <sys/mbuf.h>
 #include <sys/systm.h>
+#include <sys/jail.h>
 
 #include <netgraph/ng_message.h>
+#include <netgraph/ng_parse.h>
+#include <net/vnet.h>
 #include "ng_vnet.h"
 #include "util.h"
 #include <netgraph/netgraph.h>
@@ -42,6 +45,12 @@ static MALLOC_DEFINE(M_NETGRAPH_VNET, "netgraph_vnet", "netgraph vnet node");
 #else
 #	define M_NETGRAPH_VNET M_NETGRAPH
 #endif
+
+#define ERROUT(x)    \
+	{                \
+		error = (x); \
+		goto done;   \
+	}
 
 struct ng_vnet_private
 {
@@ -57,7 +66,10 @@ static ng_rcvdata_t     ng_vnet_rcvdata;
 
 /* List of commands and how to convert arguments to/from ASCII */
 static const struct ng_cmdlist ng_vnet_cmdlist[] = {
-	{ NGM_VNET_COOKIE, NGM_VNET_CONNECT, "connect", NULL, NULL },
+	{ NGM_VNET_COOKIE,
+     NGM_VNET_CONNECT, "connect",
+     &ng_parse_int32_type,
+     NULL },
 	{ 0 }
 };
 
@@ -78,7 +90,21 @@ ng_vnet_constructor(node_p node)
 	priv_p priv = malloc(sizeof(*priv), M_NETGRAPH_VNET, M_WAITOK);
 	NG_NODE_SET_PRIVATE(node, priv);
 	dlist_init(&priv->list);
+	priv->node = node;
 	return 0;
+}
+
+static struct prison *
+vnet_to_prison(struct vnet *vnet)
+{
+	// TODO: Find a better way to do this
+	struct prison *result;
+	int            descend;
+	FOREACH_PRISON_DESCENDANT(&prison0, result, descend)
+	{
+		if(result->pr_vnet == vnet) return result;
+	}
+	return NULL;
 }
 
 static int
@@ -87,7 +113,6 @@ ng_vnet_rcvmsg(node_p node, item_p item, hook_p lasthook)
 	const priv_p    priv  = NG_NODE_PRIVATE(node);
 	int             error = 0;
 	struct ng_mesg *msg;
-	(void)priv;
 
 	NGI_GET_MSG(item, msg);
 	switch(msg->header.typecookie)
@@ -97,20 +122,42 @@ ng_vnet_rcvmsg(node_p node, item_p item, hook_p lasthook)
 			{
 				case NGM_VNET_CONNECT:
 				{
-					/* TODO:
-					 * 1. Get JID.
-					 * 2. Find child jail with JID.
-					 * 3. Create ng_vnet node in that jail.
-					 * 4. Get its priv structure.
-					 * 5. Insert it into our list.
-					 */
-					uprintf("connect!\n");
+					if(msg->header.arglen != sizeof(uint32_t)) ERROUT(EINVAL);
+					// find child jail
+					int32_t        jid        = *(int32_t *)msg->data;
+					struct prison *jail       = vnet_to_prison(node->nd_vnet);
+					struct prison *child_jail = prison_find_child(jail, jid);
+					if(child_jail == NULL) ERROUT(EINVAL);
+					if(child_jail->pr_vnet == node->nd_vnet) ERROUT(EINVAL);
+					CURVNET_SET(child_jail->pr_vnet);
+					// create ng_vnet node inside
+					node_p child_node;
+					error =
+					  ng_make_node_common(&ng_vnet_typestruct, &child_node);
+					if(error != 0)
+					{
+						CURVNET_RESTORE();
+						ERROUT(error);
+					}
+					error = ng_vnet_constructor(child_node);
+					if(error != 0)
+					{
+						NG_NODE_UNREF(child_node);
+						CURVNET_RESTORE();
+						ERROUT(error);
+					}
+					// link to it
+					priv_p child_priv = NG_NODE_PRIVATE(child_node);
+					dlist_insert_last(&priv->list, &child_priv->list);
+					CURVNET_RESTORE();
 					break;
 				}
 			}
 			break;
-		default: error = EINVAL; break;
+		default: ERROUT(EINVAL);
 	}
+
+done:
 	NG_FREE_MSG(msg);
 	return error;
 }

@@ -36,8 +36,7 @@
 /* Netgraph control messages */
 enum
 {
-	NGM_VNET_SET_PERSISTENT = 1,
-	NGM_VNET_CONNECT,
+	NGM_VNET_CONNECT = 1,
 };
 
 #endif /* _NETGRAPH_NG_VNET_H_ */
