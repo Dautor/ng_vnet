@@ -103,6 +103,7 @@ vnet_to_prison(struct vnet *vnet)
 	if(vnet == vnet0) return &prison0;
 	struct prison *result;
 	int            descend;
+	sx_assert(&allprison_lock, SX_LOCKED);
 	FOREACH_PRISON_DESCENDANT(&prison0, result, descend)
 	{
 		if(result->pr_vnet == vnet) return result;
@@ -110,10 +111,55 @@ vnet_to_prison(struct vnet *vnet)
 	return NULL;
 }
 
+static bool
+node_is_present_in_vnet(node_p node, struct vnet *vnet)
+{
+	const priv_p priv = NG_NODE_PRIVATE(node);
+	if(vnet == node->nd_vnet) return true;
+	for(struct dlist *i = priv->list.next; i != &priv->list; i = i->next)
+	{
+		struct private *I = containerof(i, struct private, list);
+		if(vnet == I->node->nd_vnet) return true;
+	}
+	return false;
+}
+
+static int
+msg_connect(node_p node, int32_t jid)
+{
+	const priv_p priv = NG_NODE_PRIVATE(node);
+	sx_slock(&allprison_lock);
+	struct prison *pr  = vnet_to_prison(node->nd_vnet);
+	struct prison *cpr = prison_find_child(pr, jid);
+	sx_sunlock(&allprison_lock);
+	if(cpr == NULL) return EINVAL;
+	prison_hold_locked(cpr);
+	int error = 0;
+	mtx_unlock(&cpr->pr_mtx);
+	if(node_is_present_in_vnet(node, cpr->pr_vnet))
+	{
+		error = EINVAL;
+		goto done;
+	}
+	// create ng_vnet node inside
+	CURVNET_SET(cpr->pr_vnet);
+	node_p cnode;
+	error = ng_make_node_common(&typestruct, &cnode);
+	CURVNET_RESTORE();
+	if(error != 0) goto done;
+	priv_p cpriv = malloc(sizeof(*cpriv), M_NETGRAPH_VNET_HUB, M_WAITOK);
+	NG_NODE_SET_PRIVATE(cnode, cpriv);
+	cpriv->node = cnode;
+	// link to it
+	dlist_insert_last(&priv->list, &cpriv->list);
+done:
+	prison_free(cpr);
+	return error;
+}
+
 static int
 rcvmsg(node_p node, item_p item, hook_p lasthook)
 {
-	const priv_p    priv  = NG_NODE_PRIVATE(node);
 	int             error = 0;
 	struct ng_mesg *msg;
 
@@ -121,41 +167,20 @@ rcvmsg(node_p node, item_p item, hook_p lasthook)
 	switch(msg->header.typecookie)
 	{
 		case NGM_VNET_HUB_COOKIE:
+		{
 			switch(msg->header.cmd)
 			{
 				case NGM_VNET_HUB_CONNECT:
 				{
 					if(msg->header.arglen != sizeof(uint32_t)) ERROUT(EINVAL);
-					// find child jail
-					int32_t        jid        = *(int32_t *)msg->data;
-					struct prison *jail       = vnet_to_prison(node->nd_vnet);
-					struct prison *child_jail = prison_find_child(jail, jid);
-					if(child_jail == NULL) ERROUT(EINVAL);
-					if(child_jail->pr_vnet == node->nd_vnet) ERROUT(EINVAL);
-					CURVNET_SET(child_jail->pr_vnet);
-					// create ng_vnet node inside
-					node_p child_node;
-					error = ng_make_node_common(&typestruct, &child_node);
-					if(error != 0)
-					{
-						CURVNET_RESTORE();
-						ERROUT(error);
-					}
-					error = constructor(child_node);
-					if(error != 0)
-					{
-						NG_NODE_UNREF(child_node);
-						CURVNET_RESTORE();
-						ERROUT(error);
-					}
-					// link to it
-					priv_p child_priv = NG_NODE_PRIVATE(child_node);
-					dlist_insert_last(&priv->list, &child_priv->list);
-					CURVNET_RESTORE();
+					// find child prison
+					int32_t jid = *(int32_t *)msg->data;
+					error       = msg_connect(node, jid);
 					break;
 				}
 			}
 			break;
+		}
 		default: ERROUT(EINVAL);
 	}
 
@@ -168,7 +193,6 @@ static int
 rcvdata(hook_p hook, item_p item)
 {
 	const node_p       node = NG_HOOK_NODE(hook);
-	node_p             node2;
 	const priv_p       priv = NG_NODE_PRIVATE(node);
 	struct mbuf *const m    = NGI_M(item);
 	struct mbuf       *m2;
@@ -178,8 +202,8 @@ rcvdata(hook_p hook, item_p item)
 	/* send to other vnet nodes' hooks */
 	for(struct dlist *i = priv->list.next; i != &priv->list; i = i->next)
 	{
-		struct private *I = containerof(i, struct private, list);
-		node2             = I->node;
+		struct private *I     = containerof(i, struct private, list);
+		node_p          node2 = I->node;
 		LIST_FOREACH(hook2, &node2->nd_hooks, hk_hooks)
 		{
 			if((m2 = m_dup(m, M_NOWAIT)) == NULL)
