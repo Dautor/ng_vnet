@@ -58,6 +58,7 @@ struct private
 {
 	struct dlist list;
 	node_p       node;
+	int32_t      jid;
 };
 typedef struct private *priv_p;
 
@@ -66,12 +67,53 @@ static ng_rcvmsg_t      rcvmsg;
 static ng_shutdown_t    shutdown;
 static ng_rcvdata_t     rcvdata;
 
-/* List of commands and how to convert arguments to/from ASCII */
+static const struct ng_parse_struct_field list_type_elem_struct_fields[] =
+  NGM_VNET_HUB_LIST_NODE_FIELDS;
+
+static const struct ng_parse_type list_type_elem_struct = {
+	&ng_parse_struct_type,
+	&list_type_elem_struct_fields,
+};
+
+static int
+list_type_getLength(const struct ng_parse_type *type,
+                    u_char const               *start,
+                    u_char const               *buf)
+{
+	struct ngm_vnet_hub_list const *const e =
+	  (struct ngm_vnet_hub_list const *)(buf -
+	                                     offsetof(struct ngm_vnet_hub_list,
+	                                              nodes));
+	return e->n;
+}
+static const struct ng_parse_array_info list_type_elem = {
+	&list_type_elem_struct,
+	&list_type_getLength,
+	NULL
+};
+
+static const struct ng_parse_type ng_parse_vnet_hub_list_type = {
+	&ng_parse_array_type,
+	&list_type_elem
+};
+
+static const struct ng_parse_struct_field list_struct_type_fields[] =
+  NGM_VNET_HUB_LIST_FIELDS;
+static const struct ng_parse_type list_struct_type = {
+	&ng_parse_struct_type,
+	&list_struct_type_fields
+};
+
 static const struct ng_cmdlist cmdlist[] = {
-	{ NGM_VNET_HUB_COOKIE,
-     NGM_VNET_HUB_CONNECT, "connect",
-     &ng_parse_int32_type,
-     NULL },
+	{
+     NGM_VNET_HUB_COOKIE, NGM_VNET_HUB_CONNECT,
+     "connect", &ng_parse_int32_type,
+     NULL, },
+	{
+     NGM_VNET_HUB_COOKIE, NGM_VNET_HUB_LIST,
+     "list", NULL,
+     &list_struct_type,
+	 },
 	{ 0 }
 };
 
@@ -86,16 +128,6 @@ static struct ng_type typestruct = {
 };
 NETGRAPH_INIT(vnet, &typestruct);
 
-static int
-constructor(node_p node)
-{
-	priv_p priv = malloc(sizeof(*priv), M_NETGRAPH_VNET_HUB, M_WAITOK);
-	NG_NODE_SET_PRIVATE(node, priv);
-	dlist_init(&priv->list);
-	priv->node = node;
-	return 0;
-}
-
 static struct prison *
 vnet_to_prison(struct vnet *vnet)
 {
@@ -109,6 +141,20 @@ vnet_to_prison(struct vnet *vnet)
 		if(result->pr_vnet == vnet) return result;
 	}
 	return NULL;
+}
+
+static int
+constructor(node_p node)
+{
+	priv_p priv = malloc(sizeof(*priv), M_NETGRAPH_VNET_HUB, M_WAITOK);
+	NG_NODE_SET_PRIVATE(node, priv);
+	dlist_init(&priv->list);
+	priv->node = node;
+	sx_slock(&allprison_lock);
+	struct prison *pr = vnet_to_prison(node->nd_vnet);
+	priv->jid         = pr->pr_id;
+	sx_sunlock(&allprison_lock);
+	return 0;
 }
 
 static bool
@@ -129,6 +175,7 @@ msg_connect(node_p node, int32_t jid)
 {
 	const priv_p priv = NG_NODE_PRIVATE(node);
 	sx_slock(&allprison_lock);
+	// find child prison
 	struct prison *pr  = vnet_to_prison(node->nd_vnet);
 	struct prison *cpr = prison_find_child(pr, jid);
 	sx_sunlock(&allprison_lock);
@@ -150,10 +197,42 @@ msg_connect(node_p node, int32_t jid)
 	priv_p cpriv = malloc(sizeof(*cpriv), M_NETGRAPH_VNET_HUB, M_WAITOK);
 	NG_NODE_SET_PRIVATE(cnode, cpriv);
 	cpriv->node = cnode;
+	cpriv->jid  = cpr->pr_id;
 	// link to it
 	dlist_insert_last(&priv->list, &cpriv->list);
 done:
 	prison_free(cpr);
+	return error;
+}
+
+static int
+msg_list(node_p node, item_p item, struct ng_mesg *msg)
+{
+	struct ng_mesg *resp = NULL;
+	const priv_p    priv = NG_NODE_PRIVATE(node);
+	uint32_t        n    = dlist_size(&priv->list) + 1;
+
+	int resplen = sizeof(struct ngm_vnet_hub_list) +
+	              n * sizeof(struct ngm_vnet_hub_list_node);
+	NG_MKRESPONSE(resp, msg, resplen, M_NOWAIT);
+	if(resp == NULL) return ENOMEM;
+	struct ngm_vnet_hub_list *list = (struct ngm_vnet_hub_list *)resp->data;
+	list->n                        = n;
+
+	struct dlist *p = &priv->list;
+	for(uint32_t i = 0; i < n; ++i)
+	{
+		struct ngm_vnet_hub_list_node *e = list->nodes + i;
+		struct private                *I = containerof(p, struct private, list);
+
+		node_p node2   = I->node;
+		e->nodeAddress = node2->nd_ID;
+		e->jid         = I->jid;
+
+		p = p->next;
+	}
+	int error = 0;
+	NG_RESPOND_MSG(error, node, item, resp);
 	return error;
 }
 
@@ -173,9 +252,13 @@ rcvmsg(node_p node, item_p item, hook_p lasthook)
 				case NGM_VNET_HUB_CONNECT:
 				{
 					if(msg->header.arglen != sizeof(uint32_t)) ERROUT(EINVAL);
-					// find child prison
 					int32_t jid = *(int32_t *)msg->data;
 					error       = msg_connect(node, jid);
+					break;
+				}
+				case NGM_VNET_HUB_LIST:
+				{
+					error = msg_list(node, item, msg);
 					break;
 				}
 			}
