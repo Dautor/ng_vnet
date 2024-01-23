@@ -67,14 +67,6 @@ static ng_rcvmsg_t      rcvmsg;
 static ng_shutdown_t    shutdown;
 static ng_rcvdata_t     rcvdata;
 
-static const struct ng_parse_struct_field list_type_elem_struct_fields[] =
-  NGM_VNET_HUB_LIST_NODE_FIELDS;
-
-static const struct ng_parse_type list_type_elem_struct = {
-	&ng_parse_struct_type,
-	&list_type_elem_struct_fields,
-};
-
 static int
 list_type_getLength(const struct ng_parse_type *type,
                     u_char const               *start,
@@ -83,14 +75,12 @@ list_type_getLength(const struct ng_parse_type *type,
 	struct ngm_vnet_hub_list const *const e =
 	  (struct ngm_vnet_hub_list const *)(buf -
 	                                     offsetof(struct ngm_vnet_hub_list,
-	                                              nodes));
+	                                              jids));
 	return e->n;
 }
-static const struct ng_parse_array_info list_type_elem = {
-	&list_type_elem_struct,
-	&list_type_getLength,
-	NULL
-};
+static const struct ng_parse_array_info list_type_elem = { &ng_parse_int32_type,
+	                                                       &list_type_getLength,
+	                                                       NULL };
 
 static const struct ng_parse_type ng_parse_vnet_hub_list_type = {
 	&ng_parse_array_type,
@@ -113,6 +103,11 @@ static const struct ng_cmdlist cmdlist[] = {
      NGM_VNET_HUB_COOKIE, NGM_VNET_HUB_LIST,
      "list", NULL,
      &list_struct_type,
+	 },
+	{
+     NGM_VNET_HUB_COOKIE, NGM_VNET_HUB_ADDRESS,
+     "address", &ng_parse_uint32_type,
+     &ng_parse_hint32_type,
 	 },
 	{ 0 }
 };
@@ -211,27 +206,52 @@ msg_list(node_p node, item_p item, struct ng_mesg *msg)
 	struct ng_mesg *resp = NULL;
 	const priv_p    priv = NG_NODE_PRIVATE(node);
 	uint32_t        n    = dlist_size(&priv->list) + 1;
-
-	int resplen = sizeof(struct ngm_vnet_hub_list) +
-	              n * sizeof(struct ngm_vnet_hub_list_node);
+	int resplen = sizeof(struct ngm_vnet_hub_list) + n * sizeof(int32_t);
 	NG_MKRESPONSE(resp, msg, resplen, M_NOWAIT);
 	if(resp == NULL) return ENOMEM;
 	struct ngm_vnet_hub_list *list = (struct ngm_vnet_hub_list *)resp->data;
 	list->n                        = n;
-
-	struct dlist *p = &priv->list;
+	struct dlist *p                = &priv->list;
 	for(uint32_t i = 0; i < n; ++i)
 	{
-		struct ngm_vnet_hub_list_node *e = list->nodes + i;
-		struct private                *I = containerof(p, struct private, list);
-
-		node_p node2   = I->node;
-		e->nodeAddress = node2->nd_ID;
-		e->jid         = I->jid;
-
-		p = p->next;
+		struct private *I = containerof(p, struct private, list);
+		list->jids[i]     = I->jid;
+		p                 = p->next;
 	}
 	int error = 0;
+	NG_RESPOND_MSG(error, node, item, resp);
+	return error;
+}
+
+static int
+msg_address(node_p node, item_p item, struct ng_mesg *msg, int32_t jid)
+{
+	struct ng_mesg *resp  = NULL;
+	const priv_p    priv  = NG_NODE_PRIVATE(node);
+	bool            found = false;
+	uint32_t        address;
+	if(priv->jid == jid)
+	{
+		address = node->nd_ID;
+		found   = true;
+	} else
+	{
+		for(struct dlist *i = priv->list.next; i != &priv->list; i = i->next)
+		{
+			struct private *I = containerof(i, struct private, list);
+			if(I->jid == jid)
+			{
+				address = I->node->nd_ID;
+				found   = true;
+				break;
+			}
+		}
+	}
+	if(found == false) return EINVAL;
+	NG_MKRESPONSE(resp, msg, sizeof(uint32_t), M_NOWAIT);
+	if(resp == NULL) return ENOMEM;
+	*(uint32_t *)resp->data = address;
+	int error               = 0;
 	NG_RESPOND_MSG(error, node, item, resp);
 	return error;
 }
@@ -251,7 +271,7 @@ rcvmsg(node_p node, item_p item, hook_p lasthook)
 			{
 				case NGM_VNET_HUB_CONNECT:
 				{
-					if(msg->header.arglen != sizeof(uint32_t)) ERROUT(EINVAL);
+					if(msg->header.arglen != sizeof(int32_t)) ERROUT(EINVAL);
 					int32_t jid = *(int32_t *)msg->data;
 					error       = msg_connect(node, jid);
 					break;
@@ -261,12 +281,18 @@ rcvmsg(node_p node, item_p item, hook_p lasthook)
 					error = msg_list(node, item, msg);
 					break;
 				}
+				case NGM_VNET_HUB_ADDRESS:
+				{
+					if(msg->header.arglen != sizeof(int32_t)) ERROUT(EINVAL);
+					int32_t jid = *(int32_t *)msg->data;
+					error       = msg_address(node, item, msg, jid);
+					break;
+				}
 			}
 			break;
 		}
 		default: ERROUT(EINVAL);
 	}
-
 done:
 	NG_FREE_MSG(msg);
 	return error;
@@ -281,7 +307,6 @@ rcvdata(hook_p hook, item_p item)
 	struct mbuf       *m2;
 	hook_p             hook2;
 	int                error = 0;
-
 	/* send to other vnet nodes' hooks */
 	for(struct dlist *i = priv->list.next; i != &priv->list; i = i->next)
 	{
@@ -298,7 +323,6 @@ rcvdata(hook_p hook, item_p item)
 			if(error) continue; /* don't give up */
 		}
 	}
-
 	/* send to other hooks */
 	int nhooks = NG_NODE_NUMHOOKS(node);
 	if(nhooks == 1)

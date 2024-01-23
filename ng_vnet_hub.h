@@ -29,38 +29,25 @@
 #ifndef _NETGRAPH_NG_VNET_HUB_H_
 #define _NETGRAPH_NG_VNET_HUB_H_
 
-/* Node type name and magic cookie. */
 #define NG_VNET_HUB_NODE_TYPE "vnet_hub"
 #define NGM_VNET_HUB_COOKIE   3548444763
 
-struct ngm_vnet_hub_list_node
-{
-	uint32_t nodeAddress;
-	int32_t  jid;
-};
-#define NGM_VNET_HUB_LIST_NODE_FIELDS {       \
-    { "nodeAddress", &ng_parse_uint32_type }, \
-    { "jid",         &ng_parse_int32_type },  \
-    { NULL }                                  \
-}
-
 struct ngm_vnet_hub_list
 {
-	uint32_t                      n;
-	struct ngm_vnet_hub_list_node nodes[];
+	uint32_t n;
+	int32_t  jids[];
 };
-#define NGM_VNET_HUB_LIST_FIELDS {             \
-    { "n",     &ng_parse_uint32_type },        \
-    { "nodes", &ng_parse_vnet_hub_list_type }, \
-    { NULL }                                   \
+#define NGM_VNET_HUB_LIST_FIELDS {              \
+    { "n",     &ng_parse_uint32_type },         \
+    { "nodes", &ng_parse_vnet_hub_list_type },  \
+    { NULL }                                    \
 }
 
-
-/* Netgraph control messages */
 enum
 {
 	NGM_VNET_HUB_CONNECT = 1,
 	NGM_VNET_HUB_LIST,
+	NGM_VNET_HUB_ADDRESS,
 };
 
 #endif /* _NETGRAPH_NG_VNET_HUB_H_ */
